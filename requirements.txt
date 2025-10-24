@@ -1,0 +1,4 @@
+cartopy==0.25.0
+matplotlib==3.10.7
+numpy==2.3.4
+xarray==2025.6.1
