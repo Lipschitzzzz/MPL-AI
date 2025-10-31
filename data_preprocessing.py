@@ -87,8 +87,8 @@ def img_visualization(filename):
     ds = xr.open_dataset(filename)
     lons = ds['longitude'].values
     lats = ds['latitude'].values
-    # thedao so uo vo
-    thetao_dataset = ds['so'][0][10][n_start:n_end, e_start:e_end]
+    # thetao so uo vo
+    thetao_dataset = ds['thetao'][0][0][n_start:n_end, e_start:e_end]
     print(lons[e_start])
     print(lons[e_end])
     print(lats[n_start])
@@ -98,6 +98,7 @@ def img_visualization(filename):
     print(lats.shape)
     vmin = np.nanmin(thetao_dataset)
     vmax = np.nanmax(thetao_dataset)
+    print(thetao_dataset[400:,0:2])
     c = thetao_dataset.plot.pcolormesh(ax=ax, transform=ccrs.PlateCarree(), cmap='viridis',
                     vmin=vmin, vmax=vmax, add_colorbar=False,
                     x='longitude', y='latitude')
@@ -130,6 +131,6 @@ if __name__ == '__main__':
     # npz_load()
 
     dataset = np.load('npz_dataset.npz')
-    print(dataset['data'].size)
+    print(dataset['data'][0][0][0][400:][0:10])
 
-    # img_visualization(filename)
+    # img_visualization('Dataset/mercatorglorys12v1_gl12_mean_202401.nc')
