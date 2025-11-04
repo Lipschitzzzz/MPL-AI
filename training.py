@@ -1,72 +1,32 @@
+import numpy as np
 import torch
 from torch.utils.data import DataLoader, TensorDataset
 from pathlib import Path
 import visiontransformer
 import torch.nn.functional as F
 import torch.nn as nn
-from piqa import SSIM
-class GradientLoss(nn.Module):
-    def __init__(self):
-        super(GradientLoss, self).__init__()
-        # Sobel 算子
-        self.sobel_x = nn.Conv2d(1, 1, kernel_size=3, bias=False, padding=1)
-        self.sobel_y = nn.Conv2d(1, 1, kernel_size=3, bias=False, padding=1)
-        sobel_kernel_x = torch.tensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], dtype=torch.float32).view(1, 1, 3, 3)
-        sobel_kernel_y = torch.tensor([[-1, -2, -1], [0, 0, 0], [1, 2, 1]], dtype=torch.float32).view(1, 1, 3, 3)
-        self.sobel_x.weight = nn.Parameter(sobel_kernel_x)
-        self.sobel_y.weight = nn.Parameter(sobel_kernel_y)
-        for param in self.sobel_x.parameters():
-            param.requires_grad = False
-        for param in self.sobel_y.parameters():
-            param.requires_grad = False
+import data_preprocessing
 
-    def forward(self, pred, target):
-        print(pred.shape)
-        B, T, C, L, H, W = pred.shape
-        total_loss = 0
-
-        for c in range(C):
-            p = pred[:, c:c+1]  # [B,1,H,W]
-            t = target[:, c:c+1]
-
-            # 计算梯度
-            p_x = self.sobel_x(p)
-            p_y = self.sobel_y(p)
-            t_x = self.sobel_x(t)
-            t_y = self.sobel_y(t)
-
-            # L1 损失 on gradient
-            loss_x = F.l1_loss(p_x, t_x)
-            loss_y = F.l1_loss(p_y, t_y)
-            total_loss += loss_x + loss_y
-
-        return total_loss / C
-def train_zero_epoch(model, train_loader, val_loader, num_epochs, checkpoint_name_out):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+def train_zero_epoch(model, optimizer, criterion, train_loader, val_loader, num_epochs, checkpoint_name_out):
     # criterion = torch.nn.L1Loss()
     best_loss = float('inf')
-    tv_weight = 0.3
+    tv_weight = 0.1
     early_stop_cnt= 0
     best_epoch = 0
     model.train()
-    gradient_loss = GradientLoss()
     
     for epoch in range(num_epochs):
         train_loss = 0.0
         for inp, target in train_loader:
-            # print(f"inp device: {inp.device}, tgt device: {tgt.device}")
-            # print(f"model device: {next(model.parameters()).device}")  # 应该是 'cuda'
 
             pred = model(inp)
             # l1loss = criterion(pred, tgt)
             print(pred.shape)
             print(target.shape)
-            tv_loss_val = visiontransformer.tv_loss(pred)
+            # tv_loss_val = visiontransformer.tv_loss(pred)
             pred = model(inp)
             # l1loss = criterion(output, target)
-            # grad = gradient_loss(pred, target)
-            loss = 5.0 * F.l1_loss(pred, target) + 1.0 * F.mse_loss(pred, target) + tv_weight * tv_loss_val
+            loss = criterion(pred, target)
 
             train_loss += loss.item()
 
@@ -84,12 +44,8 @@ def train_zero_epoch(model, train_loader, val_loader, num_epochs, checkpoint_nam
 
                 pred = model(inp)
                 # l1loss = criterion(output, target)
-                tv_loss_val = visiontransformer.tv_loss(pred)
-                # loss = l1loss + tv_weight * tv_loss_val
-                # grad = gradient_loss(pred, target)
-                # loss = 1.0 * F.l1_loss(pred, target) + 1.0 * grad + tv_weight * tv_loss_val
-                # loss = 1.0 * F.l1_loss(pred, target) + 1.0 * F.mse_loss(pred, target) + tv_weight * tv_loss_val
-                loss = 5.0 * F.l1_loss(pred, target) + 1.0 * F.mse_loss(pred, target) + tv_weight * tv_loss_val
+                # tv_loss_val = visiontransformer.tv_loss(pred)
+                loss = criterion(pred, target)
 
                 val_loss += loss.item()
 
@@ -118,7 +74,7 @@ def train_zero_epoch(model, train_loader, val_loader, num_epochs, checkpoint_nam
         else:
             early_stop_cnt += 1
             print(f"No improvement. Current val_loss: {val_loss:.6f}, Best so far: {best_loss:.6f}, Best epoch {best_epoch}")
-        if early_stop_cnt > 10:
+        if early_stop_cnt > 200:
             break
 
 def train_non_zero_epoch(model, train_loader, val_loader, num_epochs, checkpoint_name_in, checkpoint_name_out):
@@ -126,6 +82,7 @@ def train_non_zero_epoch(model, train_loader, val_loader, num_epochs, checkpoint
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
     criterion = torch.nn.L1Loss()
     best_loss = float('inf')
+    tv_weight = 0.3
     model.to(device)
     save_dir = Path("checkpoints")
     save_dir.mkdir(exist_ok=True)
@@ -148,7 +105,8 @@ def train_non_zero_epoch(model, train_loader, val_loader, num_epochs, checkpoint
             pred = model(inp)
             l1loss = criterion(pred, tgt)
             tv_loss_val = visiontransformer.tv_loss(pred)
-            loss = l1loss + 0.2 * tv_loss_val
+            loss = 1.0 * F.l1_loss(pred, target) + 0.2 * F.mse_loss(pred, target) + tv_weight * tv_loss_val
+            # loss = l1loss + 0.2 * tv_loss_val
 
             optimizer.zero_grad()
             loss.backward()
@@ -169,7 +127,8 @@ def train_non_zero_epoch(model, train_loader, val_loader, num_epochs, checkpoint
                 target = target
                 l1loss = criterion(output, target)
                 tv_loss_val = visiontransformer.tv_loss(output)
-                loss = l1loss + 0.1 * tv_loss_val
+                # loss = l1loss + 0.1 * tv_loss_val
+                loss = 1.0 * F.l1_loss(pred, target) + 0.2 * F.mse_loss(pred, target) + tv_weight * tv_loss_val
 
                 val_loss += loss.item()
 
@@ -210,16 +169,18 @@ if __name__ == "__main__":
 
     file_paths = sorted(file_paths, key=lambda x: int(x.stem.split('_')[-1]))
 
-    data_list = visiontransformer.load_data(file_paths)[:4]
+
+    # data_list = visiontransformer.load_data(file_paths)
+    data_list = np.load("npz_dataset_normalized.npz")["data"]
     # print(f"Loaded {len(data_list)} frames.")
 
-    seq_len = 1
+    seq_len = 6
 
     # max_start_idx = len(data_list) - seq_len - 1
     # assert max_start_idx >= 0, "Not enough frames to form tensor."
 
-    train_indices = range(0, 2)
-    val_indices   = range(2, 3)
+    train_indices = range(0, 12)
+    val_indices   = range(12, 13)
 
     print("Creating training tensor...")
     x_train, y_train = visiontransformer.create_tensor(data_list, train_indices, seq_len=seq_len)
@@ -254,28 +215,30 @@ if __name__ == "__main__":
         batch_size=batch_size,
         shuffle=False,
     )
-    patch_size = (4, 4)
-    # static_mask = visiontransformer.build_static_mask(data_list, img_size=(420, 312), patch_size=patch_size)
-    # print(static_mask.shape)
+    patch_size = (3, 3)
+    static_mask = visiontransformer.build_static_mask(data_list, img_size=(420, 312), patch_size=(1, 1))
+    print(static_mask.shape)
+    # data_preprocessing.mask_visualization(static_mask)
+    
     model = visiontransformer.OceanForecastNet(
         img_size=(420, 312),
         patch_size=patch_size,
         in_chans=4,
         out_chans=4,
-        levels=5,
-        T_in=1,
-        T_out=1,
+        in_level=5,
+        t_in=1,
+        t_out=1,
         embed_dim=384,
         depth=2,
-        num_heads=2
-        # static_mask=static_mask
+        num_heads=2,
+        static_mask=static_mask
     ).to(device)
     print("device:", device)
+    criterion = visiontransformer.MaskedMAEMSELoss(mask=static_mask).cuda()
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
     # optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
     # criterion = torch.nn.L1Loss()
 
-    train_zero_epoch(model, train_loader, val_loader, 200, "checkpoints/10.31--17.38 model.pth")
+    train_zero_epoch(model, optimizer, criterion, train_loader, val_loader, 1000, "checkpoints/11.03-19.12 model.pth")
     # train_non_zero_epoch(model, train_loader, val_loader, 200, "checkpoints/new 10.30 model.pth", "checkpoints/" + str(patch_size) + "2 10.30 model.pth")
 
-
-    
