@@ -321,23 +321,70 @@ class OceanForecastNet(nn.Module):
         # [4, 312, 420]
         return prediction
 
-class MaskedMAEMSELoss(nn.Module):
-    def __init__(self, mask=None):
+import torch
+import torch.nn as nn
+
+class MaskedWeightedMAEMSELoss(nn.Module):
+    def __init__(self, mask=None, var_weights=None, tv_weight=0.0):
         super().__init__()
-        self.register_buffer('mask', mask if mask is None else mask.unsqueeze(0).unsqueeze(0))
+        if mask is not None:
+            if mask.ndim == 2:
+                mask = mask.unsqueeze(0).unsqueeze(0)
+            mask = mask.unsqueeze(0).unsqueeze(0)
+        self.register_buffer('mask', mask)
+
+        if var_weights is None:
+            var_weights = [2.0, 2.0, 1.0, 1.0]
+        var_weights = torch.tensor(var_weights, dtype=torch.float32)
+        self.register_buffer('var_weights', var_weights.view(1, 1, -1, 1, 1, 1))
+
+        self.tv_weight = tv_weight
+
+    def tv_loss(self, x, mask=None):
+        dx = torch.abs(x[:, :, :, :, 1:, :] - x[:, :, :, :, :-1, :])  # [B, T, C, L, H-1, W]
+        dy = torch.abs(x[:, :, :, :, :, 1:] - x[:, :, :, :, :, :-1])  # [B, T, C, L, H, W-1]
+
+        if mask is not None:
+            mask_dx = mask[:, :, :, :, :-1, :]
+            mask_dy = mask[:, :, :, :, :, :-1]
+            dx = dx * mask_dx
+            dy = dy * mask_dy
+
+        tv = dx.sum() + dy.sum()
+        return tv
 
     def forward(self, pred, target):
         weight1 = 1.0
         weight2 = 0.2
-        # print(pred.shape)
-        # print(target.shape)
-        loss = weight1 * abs(pred - target) + ((pred - target) ** 2) * weight2
+
+        diff = pred - target
+        l1_loss = torch.abs(diff)
+        l2_loss = diff ** 2
+        recon_loss = weight1 * l1_loss + weight2 * l2_loss
+
+        recon_loss = recon_loss * self.var_weights
 
         if self.mask is not None:
-            loss = loss * self.mask
-            return loss.sum() / (self.mask.sum() * pred.size(1) * pred.size(2) * pred.size(3) + 1e-8)
+            recon_loss = recon_loss * self.mask
+            B, T, C, L = pred.shape[:4]
+            total_valid = self.mask.sum() * B * T * C * L
+            recon_loss = recon_loss.sum() / (total_valid + 1e-8)
         else:
-            return loss.mean()
+            recon_loss = recon_loss.mean()
+
+        total_loss = recon_loss
+        if self.tv_weight > 0.0:
+            tv = self.tv_loss(pred, self.mask)
+            if self.mask is not None:
+                H, W = pred.shape[-2:]
+                valid_grads = self.mask.sum() * pred.size(0) * pred.size(1) * pred.size(2) * pred.size(3)
+                valid_grads = valid_grads * ( (H - 1) / H + (W - 1) / W ) / 2.0
+                tv = tv / (valid_grads + 1e-8)
+            else:
+                tv = tv / pred.numel()
+            total_loss = total_loss + self.tv_weight * tv
+
+        return total_loss
 
 class OceanForecastDataset(Dataset):
     def __init__(self, data_list):
