@@ -320,52 +320,68 @@ import torch
 import torch.nn as nn
 
 class MaskedWeightedMAEMSELoss(nn.Module):
-    def __init__(self, mask=None, var_weights=None, tv_weight=0.0):
+    def __init__(self, mask):
         super().__init__()
-        if mask is not None:
-            if mask.ndim == 2:
-                mask = mask.unsqueeze(0).unsqueeze(0)
-            mask = mask.unsqueeze(0).unsqueeze(0)
-        self.register_buffer('mask', mask)
-
-        if var_weights is None:
-            var_weights = [2.0, 2.0, 1.0, 1.0]
-        var_weights = torch.tensor(var_weights, dtype=torch.float32)
-        self.register_buffer('var_weights', var_weights.view(1, 1, -1, 1, 1, 1))
-
-        self.tv_weight = tv_weight
-
-    def tv_loss(self, x, mask=None):
-        dx = torch.abs(x[:, :, :, :, 1:, :] - x[:, :, :, :, :-1, :])  # [B, T, C, L, H-1, W]
-        dy = torch.abs(x[:, :, :, :, :, 1:] - x[:, :, :, :, :, :-1])  # [B, T, C, L, H, W-1]
-
-        if mask is not None:
-            mask_dx = mask[:, :, :, :, :-1, :]
-            mask_dy = mask[:, :, :, :, :, :-1]
-            dx = dx * mask_dx
-            dy = dy * mask_dy
-
-        tv = dx.sum() + dy.sum()
-        return tv
+        self.register_buffer('mask', mask.float())
 
     def forward(self, pred, target):
-        weight1 = 0.0
-        weight2 = 1.0
+        B, T, C = pred.shape[:3]
+        mask = self.mask
+        diff = (pred - target) ** 2
+        normal_loss = diff
+        total_valid = mask.sum() * B * T * C
+        normal_loss = normal_loss.sum() / (total_valid + 1e-8)
+        return normal_loss
+        # masked_diff = diff * mask
+        # return masked_diff.sum() / (mask.sum() + 1e-8) / pred.shape[1] / pred.shape[2]
 
-        diff = pred - target
-        l1_loss = torch.abs(diff)
-        l2_loss = diff ** 2
-        normal_loss = weight1 * l1_loss + weight2 * l2_loss
 
-        normal_loss = normal_loss * self.var_weights
+    # def __init__(self, mask=None, var_weights=None, tv_weight=0.0):
+    #     super().__init__()
+    #     if mask is not None:
+    #         if mask.ndim == 2:
+    #             mask = mask.unsqueeze(0).unsqueeze(0)
+    #         mask = mask.unsqueeze(0).unsqueeze(0)
+    #     self.register_buffer('mask', mask)
 
-        if self.mask is not None:
-            normal_loss = normal_loss * self.mask
-            B, T, C, L = pred.shape[:4]
-            total_valid = self.mask.sum() * B * T * C * L
-            normal_loss = normal_loss.sum() / (total_valid + 1e-8)
-        else:
-            normal_loss = normal_loss.mean()
+    #     if var_weights is None:
+    #         var_weights = [2.0, 2.0, 1.0, 1.0]
+    #     var_weights = torch.tensor(var_weights, dtype=torch.float32)
+    #     self.register_buffer('var_weights', var_weights.view(1, 1, -1, 1, 1, 1))
+
+    #     self.tv_weight = tv_weight
+
+    # def tv_loss(self, x, mask=None):
+    #     dx = torch.abs(x[:, :, :, :, 1:, :] - x[:, :, :, :, :-1, :])  # [B, T, C, L, H-1, W]
+    #     dy = torch.abs(x[:, :, :, :, :, 1:] - x[:, :, :, :, :, :-1])  # [B, T, C, L, H, W-1]
+
+    #     if mask is not None:
+    #         mask_dx = mask[:, :, :, :, :-1, :]
+    #         mask_dy = mask[:, :, :, :, :, :-1]
+    #         dx = dx * mask_dx
+    #         dy = dy * mask_dy
+
+    #     tv = dx.sum() + dy.sum()
+    #     return tv
+
+    # def forward(self, pred, target):
+    #     weight1 = 0.0
+    #     weight2 = 1.0
+
+    #     diff = pred - target
+    #     l1_loss = torch.abs(diff)
+    #     l2_loss = diff ** 2
+    #     normal_loss = weight1 * l1_loss + weight2 * l2_loss
+
+    #     normal_loss = normal_loss * self.var_weights
+
+    #     if self.mask is not None:
+    #         normal_loss = normal_loss * self.mask
+    #         B, T, C, L = pred.shape[:4]
+    #         total_valid = self.mask.sum() * B * T * C * L
+    #         normal_loss = normal_loss.sum() / (total_valid + 1e-8)
+    #     else:
+    #         normal_loss = normal_loss.mean()
 
         # total_loss = recon_loss
         # if self.tv_weight > 0.0:
