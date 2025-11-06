@@ -80,19 +80,18 @@ def build_static_mask(data_list, img_size=(420, 312), patch_size=(14, 12)):
     return torch.from_numpy(mask)
 
 class PatchEmbedding(nn.Module):
-    def __init__(self, img_size=(420, 312), patch_size=(14, 12), t_in = 6, in_chans=4, in_level=5, embed_dim=768, static_mask=None):
+    def __init__(self, img_size=(420, 312), patch_size=(14, 12), t_in = 6, in_chans=4, embed_dim=768, static_mask=None):
         super().__init__()
         self.img_size = img_size
         self.patch_size = patch_size
         self.embed_dim = embed_dim
         self.in_chans = in_chans
-        self.in_level = in_level
         self.t_in = t_in
         self.grid_h = img_size[0] // patch_size[0]
         self.grid_w = img_size[1] // patch_size[1]
         self.n_patches_total = self.grid_h * self.grid_w
         
-        self.proj = nn.Conv2d(in_chans * in_level, embed_dim, kernel_size=patch_size, stride=patch_size)
+        self.proj = nn.Conv2d(in_chans, embed_dim, kernel_size=patch_size, stride=patch_size)
         # self.proj = nn.Conv3d(in_chans * in_level * t_in,
         #                       embed_dim,
         #                       kernel_size=(t_in, self.grid_h, self.grid_w),
@@ -124,10 +123,10 @@ class PatchEmbedding(nn.Module):
             self.n_valid_patches = self.grid_h * self.grid_w
 
     def forward(self, x):
-        B, T, C, L, H, W = x.shape
+        B, T, C, H, W = x.shape
         assert (H == self.img_size[0]) and (W == self.img_size[1]), "Input size mismatch"
 
-        x = x.reshape(B * T, C * L, H, W)
+        x = x.reshape(B * T, C, H, W)
         x = self.proj(x)
 
         x = x.flatten(2).transpose(1, 2)
@@ -139,10 +138,10 @@ class PatchEmbedding(nn.Module):
         return x
 
 class SpatioTemporalTransformer(nn.Module):
-    def __init__(self, img_size=(420, 312), patch_size=(14, 12), in_chans=4, in_level=5, embed_dim=768,
-                 depth=12, t_in = 6, num_heads=12, mlp_ratio=4., dropout=0.1, static_mask=None):
+    def __init__(self, img_size=(420, 312), patch_size=(14, 12), in_chans=4, embed_dim=768,
+                 depth=12, t_in=6, num_heads=12, mlp_ratio=4., dropout=0.1, static_mask=None):
         super().__init__()
-        self.patch_embed = PatchEmbedding(img_size, patch_size, t_in, in_chans, in_level, embed_dim, static_mask)
+        self.patch_embed = PatchEmbedding(img_size, patch_size, t_in, in_chans, embed_dim, static_mask)
         self.grid_h, self.grid_w = self.patch_embed.grid_h, self.patch_embed.grid_w
         self.n_patches = self.patch_embed.n_valid_patches
         self.embed_dim = embed_dim
@@ -189,7 +188,7 @@ class SpatioTemporalTransformer(nn.Module):
             nn.init.constant_(m.weight, 1.0)
 
     def forward(self, x):
-        B, T, C, L, H, W = x.shape
+        B, T, C, H, W = x.shape
         x = self.patch_embed(x)
         # print(x.shape, ' ', self.pos_embed.shape)
         x = x + self.pos_embed[:T]
@@ -203,7 +202,6 @@ class Decoder(nn.Module):
                  embed_dim=768, 
                  out_chans=4,
                  t_out=1,
-                 in_level=5, 
                  patch_size=(14, 12),
                  img_size=(420, 312),
                  static_mask=None):
@@ -212,7 +210,6 @@ class Decoder(nn.Module):
         self.t_out = t_out
         self.img_size = img_size
         self.out_chans = out_chans
-        self.in_level = in_level
         self.grid_h = img_size[0] // patch_size[0]
         self.grid_w = img_size[1] // patch_size[1]
         self.embed_dim = embed_dim
@@ -233,13 +230,13 @@ class Decoder(nn.Module):
             self.valid_indices = None
             self.n_valid_patches = self.grid_h * self.grid_w
 
-        self.expanded_channels = out_chans * in_level * self.upscale_h * self.upscale_w
+        self.expanded_channels = out_chans * self.upscale_h * self.upscale_w
         self.proj = nn.Linear(embed_dim, self.expanded_channels)
 
         self.post_conv = nn.Sequential(
-            nn.Conv2d(out_chans * in_level, out_chans * in_level, kernel_size=3, padding=1),
+            nn.Conv2d(out_chans, out_chans, kernel_size=3, padding=1),
             nn.ReLU(inplace=True),
-            nn.Conv2d(out_chans * in_level, out_chans * in_level, kernel_size=3, padding=1)
+            nn.Conv2d(out_chans, out_chans, kernel_size=3, padding=1)
         )
 
     def forward(self, x):
@@ -249,11 +246,11 @@ class Decoder(nn.Module):
 
         x = self.proj(x)
 
-        C, L, ph, pw = self.out_chans, self.in_level, self.upscale_h, self.upscale_w
-        x = x.reshape(B, self.n_valid_patches, C * L, ph, pw)
+        C, ph, pw = self.out_chans, self.upscale_h, self.upscale_w
+        x = x.reshape(B, self.n_valid_patches, C, ph, pw)
 
         device = x.device
-        feat_map = torch.zeros(B, self.grid_h * self.grid_w, C * L, ph, pw, device=device)
+        feat_map = torch.zeros(B, self.grid_h * self.grid_w, C, ph, pw, device=device)
 
         if self.valid_indices is not None:
             for i, idx in enumerate(self.valid_indices):
@@ -261,19 +258,19 @@ class Decoder(nn.Module):
         else:
             feat_map = x
 
-        feat_map = feat_map.reshape(B, self.grid_h, self.grid_w, C * L, ph, pw)
+        feat_map = feat_map.reshape(B, self.grid_h, self.grid_w, C, ph, pw)
         feat_map = feat_map.permute(0, 3, 1, 4, 2, 5)
-        feat_map = feat_map.reshape(B, C * L, self.img_size[0], self.img_size[1])
+        feat_map = feat_map.reshape(B, C, self.img_size[0], self.img_size[1])
 
         out = self.post_conv(feat_map)
 
-        out = out.reshape(B, self.t_out, self.out_chans, self.in_level, self.img_size[0], self.img_size[1])
+        out = out.reshape(B, self.t_out, self.out_chans, self.img_size[0], self.img_size[1])
 
         return out
 
 class OceanForecastNet(nn.Module):
-    def __init__(self, img_size=(420, 312), patch_size=(14, 12), in_chans=4, in_level=5, out_chans=4,
-                 levels=5, t_in=6, t_out=1, embed_dim=768, depth=12, num_heads=12, mlp_ratio=4.,
+    def __init__(self, img_size=(420, 312), patch_size=(14, 12), in_chans=4, out_chans=4,
+                 t_in=6, t_out=1, embed_dim=768, depth=12, num_heads=12, mlp_ratio=4.,
                  dropout=0.1, static_mask=None):
         super().__init__()
         self.t_in = t_in
@@ -282,7 +279,6 @@ class OceanForecastNet(nn.Module):
             img_size=img_size,
             patch_size=patch_size,
             in_chans=in_chans,
-            in_level=in_level,
             embed_dim=embed_dim,
             depth=depth,
             t_in = t_in,
@@ -294,7 +290,6 @@ class OceanForecastNet(nn.Module):
         self.decoder = Decoder(
             embed_dim=embed_dim,
             out_chans=out_chans,
-            in_level=in_level,
             patch_size=patch_size,
             t_out=t_out,
             img_size=img_size,
@@ -318,7 +313,7 @@ class OceanForecastNet(nn.Module):
 
         prediction = output.squeeze(0).cpu().numpy()
         
-        # [4, 312, 420]
+        # [21, 312, 420]
         return prediction
 
 import torch
@@ -354,37 +349,37 @@ class MaskedWeightedMAEMSELoss(nn.Module):
         return tv
 
     def forward(self, pred, target):
-        weight1 = 1.0
-        weight2 = 0.2
+        weight1 = 0.0
+        weight2 = 1.0
 
         diff = pred - target
         l1_loss = torch.abs(diff)
         l2_loss = diff ** 2
-        recon_loss = weight1 * l1_loss + weight2 * l2_loss
+        normal_loss = weight1 * l1_loss + weight2 * l2_loss
 
-        recon_loss = recon_loss * self.var_weights
+        normal_loss = normal_loss * self.var_weights
 
         if self.mask is not None:
-            recon_loss = recon_loss * self.mask
+            normal_loss = normal_loss * self.mask
             B, T, C, L = pred.shape[:4]
             total_valid = self.mask.sum() * B * T * C * L
-            recon_loss = recon_loss.sum() / (total_valid + 1e-8)
+            normal_loss = normal_loss.sum() / (total_valid + 1e-8)
         else:
-            recon_loss = recon_loss.mean()
+            normal_loss = normal_loss.mean()
 
-        total_loss = recon_loss
-        if self.tv_weight > 0.0:
-            tv = self.tv_loss(pred, self.mask)
-            if self.mask is not None:
-                H, W = pred.shape[-2:]
-                valid_grads = self.mask.sum() * pred.size(0) * pred.size(1) * pred.size(2) * pred.size(3)
-                valid_grads = valid_grads * ( (H - 1) / H + (W - 1) / W ) / 2.0
-                tv = tv / (valid_grads + 1e-8)
-            else:
-                tv = tv / pred.numel()
-            total_loss = total_loss + self.tv_weight * tv
+        # total_loss = recon_loss
+        # if self.tv_weight > 0.0:
+        #     tv = self.tv_loss(pred, self.mask)
+        #     if self.mask is not None:
+        #         H, W = pred.shape[-2:]
+        #         valid_grads = self.mask.sum() * pred.size(0) * pred.size(1) * pred.size(2) * pred.size(3)
+        #         valid_grads = valid_grads * ( (H - 1) / H + (W - 1) / W ) / 2.0
+        #         tv = tv / (valid_grads + 1e-8)
+        #     else:
+        #         tv = tv / pred.numel()
+        #     total_loss = total_loss + self.tv_weight * tv
 
-        return total_loss
+        return normal_loss
 
 class OceanForecastDataset(Dataset):
     def __init__(self, data_list):

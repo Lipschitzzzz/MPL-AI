@@ -4,8 +4,7 @@ from torch.utils.data import DataLoader, TensorDataset
 from pathlib import Path
 import visiontransformer
 import torch.nn.functional as F
-import torch.nn as nn
-import data_preprocessing
+import time
 
 def train_zero_epoch(model, optimizer, criterion, train_loader, val_loader, num_epochs, checkpoint_name_out):
     # criterion = torch.nn.L1Loss()
@@ -74,7 +73,7 @@ def train_zero_epoch(model, optimizer, criterion, train_loader, val_loader, num_
         else:
             early_stop_cnt += 1
             print(f"No improvement. Current val_loss: {val_loss:.6f}, Best so far: {best_loss:.6f}, Best epoch {best_epoch}")
-        if early_stop_cnt > 200:
+        if early_stop_cnt > 20:
             break
 
 def train_non_zero_epoch(model, train_loader, val_loader, num_epochs, checkpoint_name_in, checkpoint_name_out):
@@ -159,35 +158,15 @@ def train_non_zero_epoch(model, train_loader, val_loader, num_epochs, checkpoint
 
 
 if __name__ == "__main__":
-    data_dir = "NpzDataset-thetaosouovo"
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    # checkpoint_name = "10.30 best_model 200 1 months.pth"
-    file_paths = list(Path(data_dir).glob("*.npz"))
-    # # print(file_paths)
-    
-    # assert len(file_paths) == 4, f"Expected 4 files, got {len(file_paths)}"
-
-    file_paths = sorted(file_paths, key=lambda x: int(x.stem.split('_')[-1]))
-
-
-    # data_list = visiontransformer.load_data(file_paths)
-    data_list = np.load("npz_dataset_normalized.npz")["data"]
-    # print(f"Loaded {len(data_list)} frames.")
-
-    seq_len = 6
-
-    # max_start_idx = len(data_list) - seq_len - 1
-    # assert max_start_idx >= 0, "Not enough frames to form tensor."
-
-    train_indices = range(0, 12)
-    val_indices   = range(12, 13)
-
+    data_list = np.load("68_months_npz_dataset_normalized.npz")["data"]
+    seq_len = 1
+    train_indices = range(0, 3)
+    val_indices   = range(3, 5)
     print("Creating training tensor...")
     x_train, y_train = visiontransformer.create_tensor(data_list, train_indices, seq_len=seq_len)
-
     print("Creating validation tensor...")
     x_val, y_val = visiontransformer.create_tensor(data_list, val_indices, seq_len=seq_len)
-
     print(f"X_train shape: {x_train.shape}")
     print(f"y_train shape: {y_train.shape}")
     print(f"X_val shape:   {x_val.shape}")
@@ -215,17 +194,15 @@ if __name__ == "__main__":
         batch_size=batch_size,
         shuffle=False,
     )
-    patch_size = (3, 3)
+    patch_size = (6, 6)
     static_mask = visiontransformer.build_static_mask(data_list, img_size=(420, 312), patch_size=(1, 1))
     print(static_mask.shape)
-    # data_preprocessing.mask_visualization(static_mask)
     
     model = visiontransformer.OceanForecastNet(
         img_size=(420, 312),
         patch_size=patch_size,
-        in_chans=4,
-        out_chans=4,
-        in_level=5,
+        in_chans=21,
+        out_chans=21,
         t_in=1,
         t_out=1,
         embed_dim=384,
@@ -234,11 +211,15 @@ if __name__ == "__main__":
         static_mask=static_mask
     ).to(device)
     print("device:", device)
-    criterion = visiontransformer.MaskedMAEMSELoss(mask=static_mask).cuda()
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
-    # optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
-    # criterion = torch.nn.L1Loss()
-
-    train_zero_epoch(model, optimizer, criterion, train_loader, val_loader, 1000, "checkpoints/11.03-19.12 model.pth")
+    # criterion = visiontransformer.MaskedWeightedMAEMSELoss(mask=static_mask).cuda()
+    # criterion = visiontransformer.MaskedWeightedMAEMSELoss(mask=static_mask).cuda()
+    criterion = torch.nn.MSELoss()
+    optimizer = torch.optim.AdamW(model.parameters(), lr=5e-4, betas=(0.9, 0.95))
+    start_time = time.time()
+    train_zero_epoch(model, optimizer, criterion, train_loader, val_loader, 200, "checkpoints/local 11.06 model.pth")
+    total_time = time.time() - start_time
+    hours, rem = divmod(total_time, 3600)
+    minutes, seconds = divmod(rem, 60)
+    print(f"Total training time: {int(hours):02d}:{int(minutes):02d}:{seconds:05.2f}")
     # train_non_zero_epoch(model, train_loader, val_loader, 200, "checkpoints/new 10.30 model.pth", "checkpoints/" + str(patch_size) + "2 10.30 model.pth")
 
