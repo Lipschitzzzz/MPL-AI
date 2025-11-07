@@ -2,64 +2,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset
-import data_preprocessing
 from pathlib import Path
-
-def get_2d_sincos_pos_embed(embed_dim, grid_size, cls_token=False):
-    """
-    Generate 2D sin-cos position embedding.
-    
-    Args:
-        embed_dim (int): Dimension of the output embedding (must be even).
-        grid_size (tuple or int): Height and width of the grid, e.g., (14, 14) or 14.
-        cls_token (bool): Whether to add a [CLS] token at the beginning.
-
-    Returns:
-        torch.Tensor: Position embedding of shape [grid_h*grid_w (+1), embed_dim]
-    """
-    if isinstance(grid_size, int):
-        grid_h = grid_w = grid_size
-    else:
-        grid_h, grid_w = grid_size
-
-    yy, xx = np.meshgrid(np.arange(grid_h), np.arange(grid_w), indexing='ij')
-    coords = np.stack([yy, xx], axis=-1)
-    coords = coords.reshape(-1, 2)
-
-    pos_embed = get_1d_sincos_pos_embed_from_coords(embed_dim, coords, cls_token=cls_token)
-
-    return pos_embed
-
-
-def get_1d_sincos_pos_embed_from_coords(embed_dim, coords, cls_token=False):
-    """
-    Generate 2D sin-cos embedding based on 2D coordinates.
-    
-    Args:
-        embed_dim (int): Dimension of the embedding (must be even).
-        coords (np.ndarray): Coordinates of shape [n, 2], in format (row, col).
-        cls_token (bool): Whether to prepend a zero embedding for [CLS].
-
-    Returns:
-        torch.Tensor: [n (+1), embed_dim]
-    """
-    assert embed_dim % 2 == 0, "Embed dimension must be even"
-
-    omega = np.arange(embed_dim // 2, dtype=np.float64)
-    omega /= (embed_dim // 2) - 1
-    omega = 1.0 / 10000**omega
-
-    out = np.einsum('ij,k->ikj', coords, omega)
-    out = out.reshape(coords.shape[0], -1)
-
-    emb = np.zeros((coords.shape[0], embed_dim), dtype=np.float64)
-    emb[:, 0::2] = np.sin(out[:, 0::2])
-    emb[:, 1::2] = np.cos(out[:, 1::2])
-
-    if cls_token:
-        emb = np.concatenate([np.zeros([1, embed_dim]), emb], axis=0)
-
-    return emb
 
 def build_static_mask(data_list, img_size=(420, 312), patch_size=(14, 12)):
     H, W = img_size
@@ -116,7 +59,8 @@ class PatchEmbedding(nn.Module):
             self.register_buffer('valid_indices', valid_indices)
             # print(valid_indices)
             self.n_valid_patches = len(valid_indices)
-            # print('self.n_valid_patches ', self.n_valid_patches)
+            print('self.n_valid_patches ', self.n_valid_patches)
+            print('self.n_patches_total ', self.n_patches_total)
         else:
             self.patch_mask = None
             self.valid_indices = None
@@ -158,6 +102,7 @@ class SpatioTemporalTransformer(nn.Module):
         # else:
         #     valid_count = self.grid_h * self.grid_w
         #     self.pos_embed = nn.Parameter(torch.zeros(1, valid_count, embed_dim))
+
         self.pos_embed = nn.Parameter(torch.zeros(t_in, self.n_patches, embed_dim))
         self.pos_drop = nn.Dropout(p=dropout)
 
@@ -197,6 +142,7 @@ class SpatioTemporalTransformer(nn.Module):
         x = self.transformer(x)
         x = self.norm(x)
         return x
+
 class Decoder(nn.Module):
     def __init__(self, 
                  embed_dim=768, 
@@ -240,32 +186,28 @@ class Decoder(nn.Module):
         )
 
     def forward(self, x):
-        B, L_total, D = x.shape
-
-        x = x[:, -self.n_valid_patches:, :]
+        B, L, D = x.shape
+        assert L == self.n_valid_patches, f"Input token length {L} != expected {self.n_valid_patches}"
 
         x = self.proj(x)
-
         C, ph, pw = self.out_chans, self.upscale_h, self.upscale_w
         x = x.reshape(B, self.n_valid_patches, C, ph, pw)
 
-        device = x.device
-        feat_map = torch.zeros(B, self.grid_h * self.grid_w, C, ph, pw, device=device)
+        total_patches = self.grid_h * self.grid_w
+        feat_map = torch.zeros(B, total_patches, C, ph, pw, device=x.device)
 
         if self.valid_indices is not None:
-            for i, idx in enumerate(self.valid_indices):
-                feat_map[:, idx] = x[:, i]
+            feat_map[:, self.valid_indices] = x
         else:
             feat_map = x
 
         feat_map = feat_map.reshape(B, self.grid_h, self.grid_w, C, ph, pw)
-        feat_map = feat_map.permute(0, 3, 1, 4, 2, 5)
+        feat_map = feat_map.permute(0, 3, 1, 4, 2, 5).contiguous()
         feat_map = feat_map.reshape(B, C, self.img_size[0], self.img_size[1])
 
         out = self.post_conv(feat_map)
 
-        out = out.reshape(B, self.t_out, self.out_chans, self.img_size[0], self.img_size[1])
-
+        out = out.squeeze(1)
         return out
 
 class OceanForecastNet(nn.Module):
@@ -275,6 +217,7 @@ class OceanForecastNet(nn.Module):
         super().__init__()
         self.t_in = t_in
         self.t_out = t_out
+
         self.encoder = SpatioTemporalTransformer(
             img_size=img_size,
             patch_size=patch_size,
@@ -316,20 +259,18 @@ class OceanForecastNet(nn.Module):
         # [21, 312, 420]
         return prediction
 
-import torch
-import torch.nn as nn
-
 class MaskedWeightedMAEMSELoss(nn.Module):
     def __init__(self, mask):
         super().__init__()
         self.register_buffer('mask', mask.float())
 
     def forward(self, pred, target):
-        B, T, C = pred.shape[:3]
+        C = pred.shape[0]
         mask = self.mask
         diff = (pred - target) ** 2
         normal_loss = diff
-        total_valid = mask.sum() * B * T * C
+        # print(normal_loss)
+        total_valid = mask.sum() * C
         normal_loss = normal_loss.sum() / (total_valid + 1e-8)
         return normal_loss
         # masked_diff = diff * mask
@@ -397,35 +338,6 @@ class MaskedWeightedMAEMSELoss(nn.Module):
 
         return normal_loss
 
-class OceanForecastDataset(Dataset):
-    def __init__(self, data_list):
-        self.data = data_list
-        self.T = len(data_list)
-        self.seq_len = 6
-
-    def __len__(self):
-        return self.T - self.seq_len
-
-    def __getitem__(self, idx):
-        input_seq = self.data[idx:idx + self.seq_len]
-        input_seq = np.stack(input_seq, axis=0)
-
-        target = self.data[idx + self.seq_len]
-
-        input_seq = torch.from_numpy(input_seq).float()
-        target = torch.from_numpy(target).float()
-
-        return input_seq, target
-
-def load_data(file_paths):
-    data_list = []
-    for fp in sorted(file_paths):
-        with np.load(fp) as data:
-            arr = data['data']
-            assert arr.shape == (4, 5, 420, 312), f"Wrong shape: {arr.shape}"
-            data_list.append(arr)
-    return data_list
-
 def create_tensor(data_list, indices, seq_len=1):
     input_seq_list = []
     target_list = []
@@ -444,16 +356,6 @@ def create_tensor(data_list, indices, seq_len=1):
 
     return inputs_tensor, targets_tensor
 
-def create_input_dataset():
-
-    data = np.load("npz_dataset.npz")["data"]
-    input_seq = np.expand_dims(data[2], axis=0)
-    input_seq = torch.tensor(input_seq, dtype=torch.float32)
-
-    input_seq = input_seq.unsqueeze(0)
-    input_seq = input_seq.to(device)
-    return input_seq
-
 def pixel_shuffle_2d(x, upscale_h, upscale_w):
     B, C_r2, H, W = x.shape
     C = C_r2 // (upscale_h * upscale_w)
@@ -462,58 +364,38 @@ def pixel_shuffle_2d(x, upscale_h, upscale_w):
     x = x.reshape(B, C, H * upscale_h, W * upscale_w)
     return x
 
-class SubsetByIndices(Dataset):
-    def __init__(self, full_data_paths, indices):
-        self.full_data_paths = full_data_paths
-        self.indices = list(indices)
-        self.seq_len = 1
-
-    def __len__(self):
-        return len(self.indices)
-
-    def __getitem__(self, idx):
-        start_idx = self.indices[idx]
-        
-        input_seq = []
-        for i in range(start_idx, start_idx + self.seq_len):
-            input_seq.append(np.load(self.full_data_paths[i])['data'])
-        input_seq = np.stack(input_seq, axis=0)
-
-        target = np.load(self.full_data_paths[start_idx + self.seq_len])['data']
-
-        return torch.from_numpy(input_seq).float(), torch.from_numpy(target).float()
-
 def tv_loss(x, beta=2.0):
     dh = torch.abs(x[..., 1:, :] - x[..., :-1, :])
     dw = torch.abs(x[..., :, 1:] - x[..., :, :-1])
     return (dh ** beta).mean() + (dw ** beta).mean()
 
-if __name__ == "__main__":
-    data_dir = "NpzDataset-thetaosouovo"
-    save_pth_name = "10.30 best_model 200 1 months.pth"
-    file_paths = list(Path(data_dir).glob("*.npz"))
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+def OceanModel(img_size=(420, 312),
+               patch_size=(6, 6),
+               in_chans = 21,
+               out_chans = 21,
+               t_in = 1,
+               t_out = 1,
+               embed_dim = 384,
+               depth = 4,
+               num_heads = 4,
+               mlp_ratio = 4,
+               dropout = 0.1,
+               static_mask = None):
     
-    assert len(file_paths) == 20, f"Expected 20 files, got {len(file_paths)}"
+    model = OceanForecastNet(
+            img_size=img_size,
+            patch_size=patch_size,
+            in_chans=in_chans,
+            out_chans=out_chans,
+            t_in=t_in,
+            t_out=t_out,
+            embed_dim=embed_dim,
+            depth=depth,
+            num_heads=num_heads,
+            static_mask=static_mask
+        )
+    return model
 
-    file_paths = sorted(file_paths, key=lambda x: int(x.stem.split('_')[-1]))
-
-    data_list = load_data(file_paths)
-
-    # model = OceanForecastNet(
-    #     img_size=(420, 312),
-    #     patch_size=(4, 4),
-    #     in_chans=4,
-    #     out_chans=4,
-    #     levels=5,
-    #     t_in=1,
-    #     embed_dim=7,
-    #     depth=2,
-    #     num_heads=2
-    # )
-    # input_dataset = create_input_dataset()
-    mask_matrix = build_static_mask(data_list, (420, 312), (4, 4))
-    print(mask_matrix.shape)
-    # data_preprocessing.mask_visualization(mask_matrix)
-    # output = model.predict('checkpoints/' + save_pth_name, input_dataset)
-    # print(output.shape)
+if __name__ == "__main__":
+    pass
+    

@@ -17,18 +17,25 @@ def nc2npz(nc_filename, npz_filename, parameters=['thetao', 'so', 'uo', 'vo'], l
     e_end = 3876
     final_dataset = []
     for i in parameters:
-        layers_dataset = []
         for j in layers:
             data_array = dataset[i][0][j][n_start:n_end, e_start:e_end]
             # print(data_array.shape)
             # print(np.nanmax(data_array))
             # print(np.nanmin(data_array))
             arr = np.nan_to_num(data_array, nan=0.0, posinf=1e5, neginf=-1e5)
-            layers_dataset.append(arr)
-        final_dataset.append(layers_dataset)
+            final_dataset.append(arr)
+    data = dataset['zos'][0][n_start:n_end, e_start:e_end].to_numpy()
+    arr = np.nan_to_num(data, nan=0.0, posinf=1e5, neginf=-1e5)
+    final_dataset.append(arr)
+    # print(final_dataset)
+    # print(np.nanmax(final_dataset))
+    # print(np.nanmin(final_dataset))
+    # print(np.array(final_dataset).shape)
+    # print(np.nanmax(data))
+    # print(np.nanmin(data))
     np.savez_compressed(npz_filename, data = final_dataset)
 
-def img_comparison(actual_dataset, prediction_dataset, var=0, level=0, title="comparison"):
+def img_comparison_by_layer(actual_dataset, prediction_dataset, var=0, level=0, title="comparison"):
 
     longitude = np.linspace(117, 143, prediction_dataset.shape[3])
     latitude = np.linspace(18, 53, prediction_dataset.shape[2])
@@ -58,6 +65,47 @@ def img_comparison(actual_dataset, prediction_dataset, var=0, level=0, title="co
     ax2.add_feature(cfeature.OCEAN, color='white')
     c2 = ax2.pcolormesh(lon_2d, lat_2d, prediction_dataset[var][level], 
                         cmap='viridis', vmin=vmin, vmax=vmax, 
+                        transform=ccrs.PlateCarree(), shading='auto')
+    ax2.set_title("Prediction Value", fontsize=14)
+    cbar_ax = fig.add_axes([0.25, 0.07, 0.5, 0.02])
+    cbar = fig.colorbar(c1, cax=cbar_ax, orientation='horizontal')
+    cbar.set_label(title, fontsize=12)
+
+    plt.subplots_adjust(wspace=0.05, bottom=0.12)
+
+    plt.savefig(title + '.jpg', dpi=300, bbox_inches='tight')
+    # plt.show()
+
+def img_comparison(actual_dataset, prediction_dataset, channel=0, title="comparison"):
+
+    longitude = np.linspace(117, 143, prediction_dataset.shape[2])
+    latitude = np.linspace(18, 53, prediction_dataset.shape[1])
+
+    proj = ccrs.PlateCarree()
+    fig, ax = plt.subplots(1, 2, figsize=(10, 8), subplot_kw={'projection': proj})
+
+    vmin = np.nanmin([prediction_dataset[channel].flat, actual_dataset[channel].flat])
+    vmax = np.nanmax([prediction_dataset[channel].flat, actual_dataset[channel].flat])
+    lon_2d, lat_2d = np.meshgrid(longitude, latitude)
+    ax1 = ax[0]
+    ax1.set_extent([117, 143, 18, 53], crs=ccrs.PlateCarree())
+    ax1.add_feature(cfeature.COASTLINE, linewidth=1.2)
+    ax1.add_feature(cfeature.BORDERS, linestyle=':', linewidth=1)
+    ax1.add_feature(cfeature.LAND, color='lightgray')
+    ax1.add_feature(cfeature.OCEAN, color='white')
+    c1 = ax1.pcolormesh(lon_2d, lat_2d, actual_dataset[channel],
+                        cmap='viridis', vmin=vmin, vmax=vmax,
+                        transform=ccrs.PlateCarree(), shading='auto')
+    ax1.set_title("Actual Value", fontsize=14)
+
+    ax2 = ax[1]
+    ax2.set_extent([117, 143, 18, 53], crs=ccrs.PlateCarree())
+    ax2.add_feature(cfeature.COASTLINE, linewidth=1.2)
+    ax2.add_feature(cfeature.BORDERS, linestyle=':', linewidth=1)
+    ax2.add_feature(cfeature.LAND, color='lightgray')
+    ax2.add_feature(cfeature.OCEAN, color='white')
+    c2 = ax2.pcolormesh(lon_2d, lat_2d, prediction_dataset[channel],
+                        cmap='viridis', vmin=vmin, vmax=vmax,
                         transform=ccrs.PlateCarree(), shading='auto')
     ax2.set_title("Prediction Value", fontsize=14)
     cbar_ax = fig.add_axes([0.25, 0.07, 0.5, 0.02])
@@ -132,18 +180,18 @@ def mask_visualization(dataset):
     plt.show()
     
 def compute_norm_stats(data, mask=None):
-    T, C, L, H, W = data.shape
+    T, C, H, W = data.shape
     assert mask.shape == (H, W), "Mask shape mismatch"
 
     global_mean = []
     global_std = []
 
     for c in range(C):
-        x = data[:, c, :, :, :]
+        x = data[:, c, :, :]
         if mask is not None:
-            x = x[:, :, mask]
+            x = x[:, mask]
         else:
-            x = x.reshape(T, L, -1)
+            x = x.reshape(T, -1)
 
         x = x.reshape(-1)
 
@@ -164,51 +212,65 @@ def compute_norm_stats(data, mask=None):
     }
 
 def normalize(data, stats, mask=None):
-    data_norm = data.copy()
-    C = data.shape[1]
+    data_norm = data.astype(np.float32).copy()
+    T, C, H, W = data.shape
 
     for c in range(C):
         mean = stats['mean'][c]
-        std = stats['std'][c]
-        data_norm[:, c, :, :, :] = (data[:, c, :, :, :] - mean) / (std + 1e-8)
+        std = stats['std'][c] + 1e-8
+        # print('mean ', mean)
+        # print('std ', std)
 
-    if mask is not None:
-        land_mask = ~mask
-        data_norm[:, :, :, land_mask] = 0
+        if mask is not None:
+            data_norm[:, c, :, :] = np.where(mask, (data[:, c, :, :] - mean) / std, 0.0)
+        else:
+            data_norm[:, c, :, :] = (data[:, c, :, :] - mean) / std
 
     return data_norm
 
+def denormalize(data_norm, stats, mask=None):
+    data_original = np.zeros_like(data_norm, dtype=np.float32)
+    T, C, H, W = data_norm.shape
+
+    for c in range(C):
+        mean = stats['mean'][c]
+        std = stats['std'][c] + 1e-8
+
+        if mask is not None:
+            data_original[:, c, :, :] = np.where(mask, data_norm[:, c, :, :] * std + mean, 0.0)
+        else:
+            data_original[:, c, :, :] = data_norm[:, c, :, :] * std + mean
+
+    return data_original
 
 if __name__ == '__main__':
-    # Step 1 Save to Npz(Monthly)
+    # nc2npz('Dataset/mercatorglorys12v1_gl12_mean_202001.nc', '21x420x312 dataset.npz')
+    # print(dataset.variables)
+
     # file_list = os.listdir('Dataset')
     # for i in file_list:
     #     print(i.split('.')[0])
     #     nc2npz('Dataset/' + i, 'NpzDataset-thetaosouovo/' + i.split('.')[0])
 
-    # step 2 Combinate Monthly Array
     # npz_load()
 
-    # dataset = calculate_mean('npz_dataset.npz')
-    # print(dataset.shape)
-
     dataset = np.load('npz_dataset.npz')
-    mask = visiontransformer.build_static_mask(dataset['data'], img_size=(420, 312), patch_size=(1, 1))
+    # print(dataset['data'].shape)
 
-    # mask = torch.from_numpy(dataset['data'][0][0]).bool().numpy()
+    mask = visiontransformer.build_static_mask(dataset['data'], img_size=(420, 312), patch_size=(1, 1)).numpy()
+    # print(mask.shape)
+    # mask_visualization(torch.from_numpy((mask)))
 
     stats = compute_norm_stats(dataset['data'], mask)
-    
     # np.savez_compressed('dataset_stats', data = stats)
-    print(dataset['data'].shape)
-    # print(mask.shape)
-    # print(value.shape)
-    print(stats)
+    # print(dataset['data'][0][3][168][40:50])
     dataset_normalized = normalize(dataset['data'], stats, mask)
-    print(dataset_normalized.shape)
-    # np.savez_compressed('npz_dataset_normalized', data = dataset_normalized)
-
-    # mask_visualization(torch.from_numpy((dataset['data'][0][0][0])))
+    # print(dataset_normalized[0][3][168][40:50])
+    dataset_original = denormalize(dataset_normalized, stats, mask)
+    # print(dataset_original[0][3][168][40:50])
+    
+    # print(dataset_normalized.shape)
+    np.savez_compressed(str(len(dataset['data'])) + '_months_npz_dataset_normalized', data = dataset_normalized)
     
     # print(dataset['data'][0][0][0][400:][0:10])
 
