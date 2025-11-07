@@ -200,7 +200,14 @@ def initialization(seq_len=1, data_list="68_months_npz_dataset_normalized.npz", 
     
     model = visiontransformer.OceanModel(static_mask=static_mask).to(device)
     # print("device:", device)
-    criterion = visiontransformer.MaskedWeightedMAEMSELoss(mask=static_mask).cuda()
+    channel_weights = (
+    [1.0] * 5 +    # 0-4
+    [1.0] * 5 +    # 5-9
+    [0.5] * 5 +    # 10-14
+    [0.5] * 5 +    # 15-19
+    [5.0] * 1      # 20
+    )
+    criterion = visiontransformer.MaskedWeightedMAEMSELoss(mask=static_mask, channel_weights=channel_weights).cuda()
     optimizer = torch.optim.AdamW(model.parameters(), lr=5e-4, betas=(0.9, 0.95))
     return model, optimizer, criterion, train_loader, val_loader
 

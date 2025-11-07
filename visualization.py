@@ -24,15 +24,15 @@ if __name__ == "__main__":
     count_parameters(model)
 
     # input_seq = data[k:k+6]
-    input_seq = np.expand_dims(data_list[12], axis=0)
+    input_seq = np.expand_dims(data_list[9], axis=0)
     input_seq = torch.tensor(input_seq, dtype=torch.float32)
 
     input_seq = input_seq.unsqueeze(0)
     input_seq = input_seq.to(device)
-    output = model.predict('checkpoints/2025_11_07_11_59_local_model.pth', input_seq)
+    output = model.predict('checkpoints/2025_11_07_15_28_GPU_Server_model.pth', input_seq)
     # [4, 5, 312, 420]
     # actual_value = data[k+6]
-    actual_value = data_list[13]
+    actual_value = data_list[10]
     print('output value shape: ', output.shape)
     print('actual value shape:' , actual_value.shape)
     with open('norm_stats.json', 'r') as f:
@@ -65,14 +65,20 @@ if __name__ == "__main__":
     #     actual_value = actual_value * static_mask.numpy()
     #     for j in range(0, 5):
     #         img_comparison(actual_value, output[0], i, j, vars[i] + " level " + str(j) + " comparison 68 months")
-    
-    criterion = visiontransformer.MaskedWeightedMAEMSELoss(mask=torch.tensor(static_mask))
+    channel_weights = (
+    [1.0] * 5 +    # 0-4
+    [1.0] * 5 +    # 5-9
+    [0.5] * 5 +    # 10-14
+    [0.5] * 5 +    # 15-19
+    [1.0] * 1      # 20
+    )
+    criterion = visiontransformer.MaskedWeightedMAEMSELoss(mask=torch.tensor(static_mask), channel_weights=channel_weights)
     print(output.shape)
     print(actual_value.shape)
-    print("Loss: ", criterion(actual_value, output))
+    print("Loss: ", criterion(torch.tensor(actual_value), output))
     actual_value = data_preprocessing.denormalize(torch.tensor(actual_value).unsqueeze(0), stats, static_mask).squeeze(0)
     output = data_preprocessing.denormalize(torch.tensor(output).unsqueeze(0), stats, static_mask).squeeze(0)
-    
+    # print("np :", np.mean(np.abs(actual_value[8] - output[8])))
 
     # output = output * std[:, None, None]  + mean[:, None, None]
     # actual_value = actual_value * std[:, None, None]  + mean[:, None, None]

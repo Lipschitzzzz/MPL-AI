@@ -260,15 +260,25 @@ class OceanForecastNet(nn.Module):
         return prediction
 
 class MaskedWeightedMAEMSELoss(nn.Module):
-    def __init__(self, mask):
+    def __init__(self, mask, channel_weights=None):
         super().__init__()
         self.register_buffer('mask', mask.float())
+
+        if channel_weights is None:
+            channel_weights = [1.0] * 21
+        
+        channel_weights = torch.tensor(channel_weights, dtype=torch.float32)
+        self.register_buffer('channel_weights', channel_weights)
 
     def forward(self, pred, target):
         C = pred.shape[0]
         mask = self.mask
-        diff = (pred - target) ** 2
-        normal_loss = diff
+        weight1 = 1.0
+        weight2 = 0.2
+        diff = torch.abs(pred - target) * weight1 + ((pred - target) ** 2) * weight2
+        weighted_loss = diff * self.channel_weights.view(C, 1, 1)
+        
+        normal_loss = weighted_loss
         # print(normal_loss)
         total_valid = mask.sum() * C
         normal_loss = normal_loss.sum() / (total_valid + 1e-8)
@@ -370,14 +380,14 @@ def tv_loss(x, beta=2.0):
     return (dh ** beta).mean() + (dw ** beta).mean()
 
 def OceanModel(img_size=(420, 312),
-               patch_size=(6, 6),
+               patch_size=(2, 2),
                in_chans = 21,
                out_chans = 21,
                t_in = 1,
                t_out = 1,
                embed_dim = 384,
-               depth = 4,
-               num_heads = 4,
+               depth = 2,
+               num_heads = 2,
                mlp_ratio = 4,
                dropout = 0.1,
                static_mask = None):
