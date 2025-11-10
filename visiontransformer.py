@@ -147,12 +147,14 @@ class Decoder(nn.Module):
     def __init__(self, 
                  embed_dim=768, 
                  out_chans=4,
+                 t_in=6,
                  t_out=1,
                  patch_size=(14, 12),
                  img_size=(420, 312),
                  static_mask=None):
         super().__init__()
         self.patch_size = patch_size
+        self.t_in = t_in
         self.t_out = t_out
         self.img_size = img_size
         self.out_chans = out_chans
@@ -186,6 +188,12 @@ class Decoder(nn.Module):
         )
 
     def forward(self, x):
+        x = x.view(B, self.t_in, self.n_valid_patches, D)
+
+        x = x.permute(0, 2, 1, 3)
+
+        x = x.reshape(B, self.n_valid_patches, self.t_in * D)
+
         B, L, D = x.shape
         assert L == self.n_valid_patches, f"Input token length {L} != expected {self.n_valid_patches}"
 
@@ -386,8 +394,8 @@ def OceanModel(img_size=(420, 312),
                t_in = 1,
                t_out = 1,
                embed_dim = 384,
-               depth = 2,
-               num_heads = 2,
+               depth = 3,
+               num_heads = 3,
                mlp_ratio = 4,
                dropout = 0.1,
                static_mask = None):
