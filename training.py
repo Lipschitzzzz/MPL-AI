@@ -20,8 +20,8 @@ def train_zero_epoch(model, optimizer, criterion, train_loader, val_loader, num_
 
             pred = model(inp)
             # l1loss = criterion(pred, tgt)
-            print("epoch: ", epoch, " pred:   ", pred.shape)
-            print("epoch: ", epoch, " target: ", target.shape)
+            print("epoch: ", epoch+1, " pred:   ", pred.shape)
+            print("epoch: ", epoch+1, " target: ", target.shape)
             # tv_loss_val = visiontransformer.tv_loss(pred)
             pred = model(inp)
             # l1loss = criterion(output, target)
@@ -161,10 +161,10 @@ def train_non_zero_epoch(model, train_loader, val_loader, num_epochs, checkpoint
         if early_stop_cnt > 10:
             break
 
-def initialization(seq_len=1, data_list="68_months_npz_dataset_normalized.npz", train_indices=range(0, 3),
-                   val_indices=range(3, 5), patch_size=(6, 6)):
+def initialization(seq_len=5, data_list="609_days_npz_dataset_normalized.npz", train_indices=range(0, 10),
+                   val_indices=range(10, 12), patch_size=(6, 6)):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    data_list = np.load(data_list)["data"]
+    data_list = np.load(data_list)["data"][:17]
     seq_len = seq_len
     train_indices = train_indices
     val_indices   = val_indices
@@ -197,18 +197,17 @@ def initialization(seq_len=1, data_list="68_months_npz_dataset_normalized.npz", 
         shuffle=False,
     )
     static_mask = visiontransformer.build_static_mask(data_list, img_size=(420, 312), patch_size=(1, 1))
-    
-    model = visiontransformer.OceanModel(static_mask=static_mask).to(device)
+    model = visiontransformer.OceanModel(t_in=seq_len, static_mask=static_mask).to(device)
     # print("device:", device)
     channel_weights = (
     [1.0] * 5 +    # 0-4
     [1.0] * 5 +    # 5-9
-    [0.5] * 5 +    # 10-14
-    [0.5] * 5 +    # 15-19
+    [1.0] * 5 +    # 10-14
+    [1.0] * 5 +    # 15-19
     [5.0] * 1      # 20
     )
     criterion = visiontransformer.MaskedWeightedMAEMSELoss(mask=static_mask, channel_weights=channel_weights).cuda()
-    optimizer = torch.optim.AdamW(model.parameters(), lr=5e-4, betas=(0.9, 0.95))
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, betas=(0.9, 0.95))
     return model, optimizer, criterion, train_loader, val_loader
 
 if __name__ == "__main__":
@@ -216,7 +215,7 @@ if __name__ == "__main__":
     timestamp_str = time.strftime("%Y_%m_%d_%H_%M", time.localtime(start_time))
     best_loss = float('inf')
     model, optimizer, criterion, train_loader, val_loader = initialization()
-    train_zero_epoch(model, optimizer, criterion, train_loader, val_loader, 20, "checkpoints/" + timestamp_str + "_local_model.pth")
+    train_zero_epoch(model, optimizer, criterion, train_loader, val_loader, 200, "checkpoints/" + timestamp_str + "_local_model.pth")
     
     # train_non_zero_epoch(model, train_loader, val_loader, 200, "checkpoints/new 10.30 model.pth", "checkpoints/" + str(patch_size) + "2 10.30 model.pth")
 

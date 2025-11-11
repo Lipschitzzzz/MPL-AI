@@ -3,7 +3,15 @@ import torch
 import torch.nn as nn
 from torch.utils.data import Dataset
 from pathlib import Path
-
+def build_causal_temporal_mask(T: int, N_s: int, device=None):
+    N = T * N_s
+    time_idx = torch.arange(T, device=device).repeat_interleave(N_s)  # [N]
+    allow = time_idx[:, None] >= time_idx[None, :]  # [N, N], bool
+    mask = torch.zeros_like(allow, dtype=torch.float32, device=device)
+    mask = mask.masked_fill(~allow, float('-inf'))
+    # print(mask)
+    return mask
+    
 def build_static_mask(data_list, img_size=(420, 312), patch_size=(14, 12)):
     H, W = img_size
     pH, pW = patch_size
@@ -59,8 +67,8 @@ class PatchEmbedding(nn.Module):
             self.register_buffer('valid_indices', valid_indices)
             # print(valid_indices)
             self.n_valid_patches = len(valid_indices)
-            print('self.n_valid_patches ', self.n_valid_patches)
-            print('self.n_patches_total ', self.n_patches_total)
+            print('valid_patches: ', self.n_valid_patches)
+            print('patches_total: ', self.n_patches_total)
         else:
             self.patch_mask = None
             self.valid_indices = None
@@ -78,7 +86,7 @@ class PatchEmbedding(nn.Module):
 
         if self.valid_indices is not None:
             x = x[:, :, self.valid_indices, :]
-
+        # print(x.shape)
         return x
 
 class SpatioTemporalTransformer(nn.Module):
@@ -87,6 +95,7 @@ class SpatioTemporalTransformer(nn.Module):
         super().__init__()
         self.patch_embed = PatchEmbedding(img_size, patch_size, t_in, in_chans, embed_dim, static_mask)
         self.grid_h, self.grid_w = self.patch_embed.grid_h, self.patch_embed.grid_w
+        self.t_in = t_in
         self.n_patches = self.patch_embed.n_valid_patches
         self.embed_dim = embed_dim
         # print('self.n_patches ', self.n_patches)
@@ -103,7 +112,10 @@ class SpatioTemporalTransformer(nn.Module):
         #     valid_count = self.grid_h * self.grid_w
         #     self.pos_embed = nn.Parameter(torch.zeros(1, valid_count, embed_dim))
 
-        self.pos_embed = nn.Parameter(torch.zeros(t_in, self.n_patches, embed_dim))
+        # self.pos_embed = nn.Parameter(torch.zeros(1, self.n_patches, embed_dim))
+        self.spatial_pos_embed = nn.Parameter(torch.zeros(1, self.n_patches, embed_dim))
+        self.temporal_pos_embed = nn.Parameter(torch.zeros(1, self.t_in, self.embed_dim))
+
         self.pos_drop = nn.Dropout(p=dropout)
 
         encoder_layer = nn.TransformerEncoderLayer(
@@ -120,7 +132,8 @@ class SpatioTemporalTransformer(nn.Module):
         self._init_weights()
 
     def _init_weights(self):
-        nn.init.trunc_normal_(self.pos_embed, std=0.02)
+        nn.init.trunc_normal_(self.spatial_pos_embed, std=0.02)
+        nn.init.trunc_normal_(self.temporal_pos_embed, std=0.02)
         self.apply(self._init_layer_weights)
 
     def _init_layer_weights(self, m):
@@ -134,12 +147,25 @@ class SpatioTemporalTransformer(nn.Module):
 
     def forward(self, x):
         B, T, C, H, W = x.shape
+        assert T == self.patch_embed.t_in, f"Input time steps {T} != expected {self.patch_embed.t_in}"
+
         x = self.patch_embed(x)
         # print(x.shape, ' ', self.pos_embed.shape)
-        x = x + self.pos_embed[:T]
+        x = x + self.spatial_pos_embed.unsqueeze(1)   # [1, 1, n_patches, D]
+        x = x + self.temporal_pos_embed.unsqueeze(2)  # [1, T, 1, D]
+
+        # x = x + self.pos_embed
         x = self.pos_drop(x)
+
         x = x.reshape(B, T * self.n_patches, self.embed_dim)
-        x = self.transformer(x)
+
+        causal_mask = build_causal_temporal_mask(
+        T=T,
+        N_s=self.n_patches,
+        device=x.device
+        )  # [T*N_s, T*N_s]
+        
+        x = self.transformer(x, mask=causal_mask)
         x = self.norm(x)
         return x
 
@@ -181,6 +207,8 @@ class Decoder(nn.Module):
         self.expanded_channels = out_chans * self.upscale_h * self.upscale_w
         self.proj = nn.Linear(embed_dim, self.expanded_channels)
 
+        self.temporal_aggregator = nn.Linear(self.t_in * self.embed_dim, self.embed_dim)
+
         self.post_conv = nn.Sequential(
             nn.Conv2d(out_chans, out_chans, kernel_size=3, padding=1),
             nn.ReLU(inplace=True),
@@ -188,11 +216,14 @@ class Decoder(nn.Module):
         )
 
     def forward(self, x):
+        B, L, D = x.shape
         x = x.view(B, self.t_in, self.n_valid_patches, D)
 
         x = x.permute(0, 2, 1, 3)
 
         x = x.reshape(B, self.n_valid_patches, self.t_in * D)
+
+        x = self.temporal_aggregator(x)
 
         B, L, D = x.shape
         assert L == self.n_valid_patches, f"Input token length {L} != expected {self.n_valid_patches}"
@@ -242,6 +273,7 @@ class OceanForecastNet(nn.Module):
             embed_dim=embed_dim,
             out_chans=out_chans,
             patch_size=patch_size,
+            t_in=t_in,
             t_out=t_out,
             img_size=img_size,
             static_mask=static_mask
@@ -388,14 +420,14 @@ def tv_loss(x, beta=2.0):
     return (dh ** beta).mean() + (dw ** beta).mean()
 
 def OceanModel(img_size=(420, 312),
-               patch_size=(2, 2),
+               patch_size=(6, 6),
                in_chans = 21,
                out_chans = 21,
-               t_in = 1,
+               t_in = 30,
                t_out = 1,
-               embed_dim = 384,
-               depth = 3,
-               num_heads = 3,
+               embed_dim = 256,
+               depth = 2,
+               num_heads = 2,
                mlp_ratio = 4,
                dropout = 0.1,
                static_mask = None):
