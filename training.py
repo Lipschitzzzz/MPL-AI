@@ -7,6 +7,7 @@ import torch.nn.functional as F
 import time
 
 def train_zero_epoch(model, optimizer, criterion, train_loader, val_loader, num_epochs, checkpoint_name_out):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     start_time = time.time()
     best_loss = float('inf')
     tv_weight = 0.1
@@ -17,13 +18,15 @@ def train_zero_epoch(model, optimizer, criterion, train_loader, val_loader, num_
     for epoch in range(num_epochs):
         train_loss = 0.0
         for inp, target in train_loader:
+            inp = inp.to(device)
+            target = target.to(device)
 
-            pred = model(inp)
             # l1loss = criterion(pred, tgt)
-            print("epoch: ", epoch+1, " pred:   ", pred.shape)
-            print("epoch: ", epoch+1, " target: ", target.shape)
+
             # tv_loss_val = visiontransformer.tv_loss(pred)
             pred = model(inp)
+            print("epoch: ", epoch+1, " pred:   ", pred.shape)
+            print("epoch: ", epoch+1, " target: ", target.shape)
             # l1loss = criterion(output, target)
             loss = criterion(pred[0], target[0][0])
 
@@ -40,6 +43,8 @@ def train_zero_epoch(model, optimizer, criterion, train_loader, val_loader, num_
         val_loss = 0.0
         with torch.no_grad():
             for inp, target in val_loader:
+                inp = inp.to(device)
+                target = target.to(device)
 
                 pred = model(inp)
                 # l1loss = criterion(output, target)
@@ -176,12 +181,18 @@ def initialization(seq_len=5, data_list="609_days_npz_dataset_normalized.npz", t
     print(f"y_train shape: {y_train.shape}")
     print(f"X_val shape:   {x_val.shape}")
     print(f"y_val shape:   {y_val.shape}")
-    x_train = x_train.to(device)
-    y_train = y_train.to(device)
-    x_val = x_val.to(device)
-    y_val = y_val.to(device)
-    train_dataset = TensorDataset(x_train, y_train)
-    val_dataset   = TensorDataset(x_val, y_val)
+    np.savez('train_data.npz', x=x_train, y=y_train)
+    np.savez('val_data.npz', x=x_val, y=y_val)
+
+    # x_train = x_train.to(device)
+    # y_train = y_train.to(device)
+    # x_val = x_val.to(device)
+    # y_val = y_val.to(device)
+    # train_dataset = TensorDataset(x_train, y_train)
+    # val_dataset   = TensorDataset(x_val, y_val)
+    train_dataset = visiontransformer.OceanDataSet('train_data.npz')
+    val_dataset   = visiontransformer.OceanDataSet('val_data.npz')
+
     print(f"Train dataset size: {len(train_dataset)}")
     print(f"Val dataset size:   {len(val_dataset)}")
     batch_size = 1

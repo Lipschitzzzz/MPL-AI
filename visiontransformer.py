@@ -30,6 +30,25 @@ def build_static_mask(data_list, img_size=(420, 312), patch_size=(14, 12)):
 
     return torch.from_numpy(mask)
 
+class OceanDataSet(Dataset):
+    def __init__(self, data_path, split='train'):
+        self.data = np.load(data_path, mmap_mode='r')
+        self.split = split
+
+    def __len__(self):
+        return len(self.data['x'])
+
+    def __getitem__(self, idx):
+        x = self.data['x'][idx]  # shape: (30, 21, 420, 312)
+        y = self.data['y'][idx]  # shape: (1, 21, 420, 312)
+        # print(x.shape)
+        # print(y.shape)
+
+        return torch.from_numpy(x).float(), torch.from_numpy(y).float()
+
+    def __del__(self):
+        self.data.close()
+
 class PatchEmbedding(nn.Module):
     def __init__(self, img_size=(420, 312), patch_size=(14, 12), t_in = 6, in_chans=4, embed_dim=768, static_mask=None):
         super().__init__()
