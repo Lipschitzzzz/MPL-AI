@@ -3,6 +3,8 @@ import torch
 import torch.nn as nn
 from torch.utils.data import Dataset
 from pathlib import Path
+import os
+
 def build_causal_temporal_mask(T: int, N_s: int, device=None):
     N = T * N_s
     time_idx = torch.arange(T, device=device).repeat_interleave(N_s)  # [N]
@@ -406,6 +408,32 @@ class MaskedWeightedMAEMSELoss(nn.Module):
         #     total_loss = total_loss + self.tv_weight * tv
 
         return normal_loss
+
+class TimeSeriesDataset(Dataset):
+    def __init__(self, data_dir, total_timesteps=609, seq_len=30):
+        self.data_dir = data_dir
+        self.seq_len = seq_len
+        self.total_timesteps = total_timesteps
+        self.start_indices = list(range(total_timesteps - seq_len))
+
+    def __len__(self):
+        return len(self.start_indices)
+
+    def __getitem__(self, idx):
+        start_t = self.start_indices[idx]
+        
+        inputs = []
+        for i in range(self.seq_len):
+            path = os.path.join(self.data_dir, f"t_{start_t + i:03d}.npy")
+            frame = np.load(path)  # shape: (21, 420, 312)
+            inputs.append(frame)
+        inputs = np.stack(inputs, axis=0)  # (seq_len, 21, 420, 312)
+
+        target_path = os.path.join(self.data_dir, f"t_{start_t + self.seq_len:03d}.npy")
+        target = np.load(target_path)  # (21, 420, 312)
+        target = np.expand_dims(target, axis=0)  # (1, 21, 420, 312)
+
+        return torch.from_numpy(inputs).float(), torch.from_numpy(target).float()
 
 def create_tensor(data_list, indices, seq_len=1):
     input_seq_list = []

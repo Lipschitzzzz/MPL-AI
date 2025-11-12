@@ -1,6 +1,6 @@
 import numpy as np
 import torch
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import DataLoader, TensorDataset, Subset
 from pathlib import Path
 import visiontransformer
 import torch.nn.functional as F
@@ -166,17 +166,17 @@ def train_non_zero_epoch(model, train_loader, val_loader, num_epochs, checkpoint
         if early_stop_cnt > 10:
             break
 
-def initialization(seq_len=5, data_list="609_days_npz_dataset_normalized.npz", train_indices=range(0, 10),
-                   val_indices=range(10, 12), patch_size=(6, 6)):
+def initialization(seq_len=30, data_list="609_days_npz_dataset_normalized.npz", train_indices=range(0, 365),
+                   val_indices=range(365, 365+107), patch_size=(6, 6)):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    data_list = np.load(data_list)["data"][:17]
+    data_list = np.load(data_list)["data"]
     seq_len = seq_len
     train_indices = train_indices
     val_indices   = val_indices
     print("Creating training tensor...")
-    x_train, y_train = visiontransformer.create_tensor(data_list, train_indices, seq_len=seq_len)
+    x_train, y_train = visiontransformer.create_tensor_fast(data_list, train_indices, seq_len=seq_len)
     print("Creating validation tensor...")
-    x_val, y_val = visiontransformer.create_tensor(data_list, val_indices, seq_len=seq_len)
+    x_val, y_val = visiontransformer.create_tensor_fast(data_list, val_indices, seq_len=seq_len)
     print(f"X_train shape: {x_train.shape}")
     print(f"y_train shape: {y_train.shape}")
     print(f"X_val shape:   {x_val.shape}")
@@ -190,26 +190,84 @@ def initialization(seq_len=5, data_list="609_days_npz_dataset_normalized.npz", t
     # y_val = y_val.to(device)
     # train_dataset = TensorDataset(x_train, y_train)
     # val_dataset   = TensorDataset(x_val, y_val)
-    train_dataset = visiontransformer.OceanDataSet('train_data.npz')
-    val_dataset   = visiontransformer.OceanDataSet('val_data.npz')
+    # train_dataset = visiontransformer.OceanDataSet('train_data.npz')
+    # val_dataset   = visiontransformer.OceanDataSet('val_data.npz')
 
-    print(f"Train dataset size: {len(train_dataset)}")
-    print(f"Val dataset size:   {len(val_dataset)}")
-    batch_size = 1
-    patch_size = patch_size
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=batch_size,
-        shuffle=False,
+    # print(f"Train dataset size: {len(train_dataset)}")
+    # print(f"Val dataset size:   {len(val_dataset)}")
+    # batch_size = 1
+    # patch_size = patch_size
+    # train_loader = DataLoader(
+    #     train_dataset,
+    #     batch_size=batch_size,
+    #     shuffle=False,
+    # )
+    # val_loader = DataLoader(
+    #     val_dataset,
+    #     batch_size=batch_size,
+    #     shuffle=False,
+    # )
+    # static_mask = visiontransformer.build_static_mask(data_list, img_size=(420, 312), patch_size=(1, 1))
+    # model = visiontransformer.OceanModel(t_in=seq_len, static_mask=static_mask).to(device)
+    # # print("device:", device)
+    # channel_weights = (
+    # [1.0] * 5 +    # 0-4
+    # [1.0] * 5 +    # 5-9
+    # [1.0] * 5 +    # 10-14
+    # [1.0] * 5 +    # 15-19
+    # [5.0] * 1      # 20
+    # )
+    # criterion = visiontransformer.MaskedWeightedMAEMSELoss(mask=static_mask, channel_weights=channel_weights).cuda()
+    # optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, betas=(0.9, 0.95))
+    # return model, optimizer, criterion, train_loader, val_loader
+
+if __name__ == "__main__":
+    start_time = time.time()
+    timestamp_str = time.strftime("%Y_%m_%d_%H_%M", time.localtime(start_time))
+    best_loss = float('inf')
+    # initialization()
+
+    # data = np.load('609_days_npz_dataset_normalized.npz')["data"]  # shape: (609, 21, 420, 312)
+
+    # save_dir = "time_steps"
+    # os.makedirs(save_dir, exist_ok=True)
+
+    # for t in range(data.shape[0]):
+    #     np.save(os.path.join(save_dir, f"t_{t:03d}.npy"), data[t])
+
+    # print(f"save {data.shape[0]} ge {save_dir}/")
+
+    full_dataset = visiontransformer.TimeSeriesDataset(
+        data_dir="time_steps",
+        total_timesteps=609,
+        seq_len=30
     )
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=batch_size,
-        shuffle=False,
-    )
+
+    total_samples = len(full_dataset)
+    train_size = int(0.8 * total_samples)
+    val_size = total_samples - train_size
+
+    train_indices = list(range(train_size))
+    val_indices = list(range(train_size, total_samples))
+
+    train_dataset = Subset(full_dataset, train_indices)
+    val_dataset = Subset(full_dataset, val_indices)
+
+    train_loader = DataLoader(train_dataset, batch_size=1, shuffle=True, num_workers=2)
+    val_loader = DataLoader(val_dataset, batch_size=1, shuffle=False, num_workers=2)
+
+    # print(dataloader.shape)
+
+    # for x, y in dataloader:
+    #     print("Input shape:", x.shape)   # [1, 5, 21, 420, 312]
+    #     print("Target shape:", y.shape)  # [1, 1, 21, 420, 312]
+    #     break
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    data_list = np.load("609_days_npz_dataset_normalized.npz")["data"]
+    
     static_mask = visiontransformer.build_static_mask(data_list, img_size=(420, 312), patch_size=(1, 1))
-    model = visiontransformer.OceanModel(t_in=seq_len, static_mask=static_mask).to(device)
-    # print("device:", device)
+    model = visiontransformer.OceanModel(t_in=30, static_mask=static_mask).to(device)
+    # # print("device:", device)
     channel_weights = (
     [1.0] * 5 +    # 0-4
     [1.0] * 5 +    # 5-9
@@ -219,13 +277,7 @@ def initialization(seq_len=5, data_list="609_days_npz_dataset_normalized.npz", t
     )
     criterion = visiontransformer.MaskedWeightedMAEMSELoss(mask=static_mask, channel_weights=channel_weights).cuda()
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, betas=(0.9, 0.95))
-    return model, optimizer, criterion, train_loader, val_loader
 
-if __name__ == "__main__":
-    start_time = time.time()
-    timestamp_str = time.strftime("%Y_%m_%d_%H_%M", time.localtime(start_time))
-    best_loss = float('inf')
-    model, optimizer, criterion, train_loader, val_loader = initialization()
     train_zero_epoch(model, optimizer, criterion, train_loader, val_loader, 200, "checkpoints/" + timestamp_str + "_local_model.pth")
     
     # train_non_zero_epoch(model, train_loader, val_loader, 200, "checkpoints/new 10.30 model.pth", "checkpoints/" + str(patch_size) + "2 10.30 model.pth")
